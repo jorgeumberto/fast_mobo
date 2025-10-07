@@ -1,0 +1,26 @@
+name: fast_mobo
+description: "A new Flutter project."
+publish_to: 'none'
+version: 0.1.0
+
+environment:
+  sdk: ^3.9.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  flutter_bloc: ^8.1.3 # ou a versão mais recente
+  equatable: ^2.0.5
+  http: ^1.1.0
+  get_it: ^7.6.4 # Pacote para Injeção de Dependên
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+  shared_preferences: ^2.0.15
+  email_validator: ^2.0.1
+
+flutter:
+  uses-material-design: true
