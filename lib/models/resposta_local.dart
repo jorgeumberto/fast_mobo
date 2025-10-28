@@ -1,37 +1,38 @@
 class RespostaLocal {
-  final int perguntaId;
+  int perguntaId;
 
-  // Para TextBox / RadioButton
-  String? valor;
+  // resposta principal
+  String? valor;                 // Para TextBox/RadioButton
+  List<String> valoresMultiplos; // Para CheckBoxList
 
-  // Para CheckBoxList (múltiplas opções)
-  List<String> valoresMultiplos;
+  // complementos
+  String? justificativa;
+  List<String> midias;
 
-  // Controle de sincronização
+  // status de sync
   bool sincronizado;
 
   RespostaLocal({
     required this.perguntaId,
     this.valor,
-    List<String>? valoresMultiplos,
-    this.sincronizado = false,
-  }) : valoresMultiplos = valoresMultiplos ?? [];
+    this.valoresMultiplos = const [],
+    this.justificativa,
+    this.midias = const [],
+    this.sincronizado = true,
+  });
 
   factory RespostaLocal.fromJson(Map<String, dynamic> json) {
-    List<String> mult = [];
-    if (json['valores_multiplos'] is List) {
-      mult = (json['valores_multiplos'] as List)
-          .map((e) => e.toString())
-          .toList();
-    }
-
     return RespostaLocal(
-      perguntaId: json['pergunta_id'] is int
-          ? json['pergunta_id']
-          : int.tryParse(json['pergunta_id'].toString()) ?? 0,
+      perguntaId: json['pergunta_id'] as int,
       valor: json['valor']?.toString(),
-      valoresMultiplos: mult,
-      sincronizado: json['sincronizado'] == true,
+      valoresMultiplos: (json['valores_multiplos'] as List<dynamic>? ?? [])
+          .map((e) => e.toString())
+          .toList(),
+      justificativa: json['justificativa']?.toString(),
+      midias: (json['midias'] as List<dynamic>? ?? [])
+          .map((e) => e.toString())
+          .toList(),
+      sincronizado: json['sincronizado'] == false ? false : true,
     );
   }
 
@@ -40,6 +41,8 @@ class RespostaLocal {
       'pergunta_id': perguntaId,
       'valor': valor,
       'valores_multiplos': valoresMultiplos,
+      'justificativa': justificativa,
+      'midias': midias,
       'sincronizado': sincronizado,
     };
   }

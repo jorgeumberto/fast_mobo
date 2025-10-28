@@ -1,13 +1,15 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:fast_mobo/models/questionario.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:image_picker/image_picker.dart';
 
 import 'api.dart';
 import 'models/pergunta.dart';
 import 'models/resposta_local.dart';
-import 'utils/input_formatters.dart'; // <- garante que esse caminho bate com onde você salvou
+import 'utils/input_formatters.dart';
 
 class QuestionarioPage extends StatefulWidget {
   final Questionario questionario;
@@ -24,11 +26,14 @@ class _QuestionarioPageState extends State<QuestionarioPage> {
   String? _erro;
   List<Pergunta> _perguntas = [];
 
-  // Respostas atuais do usuário (perguntaId -> respostaLocal)
+  // perguntaId -> RespostaLocal (estado atual offline)
   final Map<int, RespostaLocal> _respostas = {};
 
+  // image picker
+  final ImagePicker _picker = ImagePicker();
+
   // =========================================================
-  // Helpers de cache - PERGUNTAS
+  // CACHE: PERGUNTAS
   // =========================================================
   Future<void> _loadPerguntasFromCache() async {
     final sp = await SharedPreferences.getInstance();
@@ -48,17 +53,19 @@ class _QuestionarioPageState extends State<QuestionarioPage> {
           _erro = null;
         });
 
-        // Inicializa respostas com base nas perguntas em cache
+        // inicializa _respostas com base nas perguntas cacheadas
         for (final p in listaCache) {
           _respostas[p.id] = RespostaLocal(
             perguntaId: p.id,
             valor: p.respostaSimples,
             valoresMultiplos: List<String>.from(p.respostaMultipla),
-            sincronizado: true, // default inicial, pode ser sobrescrito depois
+            justificativa: p.justificativa,
+            midias: List<String>.from(p.midias),
+            sincronizado: true,
           );
         }
       } catch (_) {
-        // cache corrompido → ignora
+        // cache inválido => ignora
       }
     }
   }
@@ -71,7 +78,7 @@ class _QuestionarioPageState extends State<QuestionarioPage> {
   }
 
   // =========================================================
-  // Helpers de cache - RESPOSTAS
+  // CACHE: RESPOSTAS
   // =========================================================
   Future<void> _loadRespostasFromCache() async {
     final sp = await SharedPreferences.getInstance();
@@ -81,13 +88,12 @@ class _QuestionarioPageState extends State<QuestionarioPage> {
     if (cached != null && cached.isNotEmpty) {
       try {
         final decoded = jsonDecode(cached);
-
         for (final item in decoded) {
           final r = RespostaLocal.fromJson(item);
           _respostas[r.perguntaId] = r;
         }
 
-        // aplica essas respostas carregadas nas perguntas atuais
+        // aplica respostas carregadas nas perguntas em memória
         setState(() {
           _perguntas = _perguntas.map((p) {
             final r = _respostas[p.id];
@@ -103,11 +109,15 @@ class _QuestionarioPageState extends State<QuestionarioPage> {
               respostaMultipla: r?.valoresMultiplos.isNotEmpty == true
                   ? List<String>.from(r!.valoresMultiplos)
                   : List<String>.from(p.respostaMultipla),
+              obrigaMidia: p.obrigaMidia,
+              obrigaJustificativa: p.obrigaJustificativa,
+              justificativa: r?.justificativa ?? p.justificativa,
+              midias: r?.midias ?? p.midias,
             );
           }).toList();
         });
       } catch (_) {
-        // cache corrompido → ignora
+        // cache inválido => ignora
       }
     }
   }
@@ -121,14 +131,14 @@ class _QuestionarioPageState extends State<QuestionarioPage> {
   }
 
   // =========================================================
-  // Carregamento geral da tela
+  // LOAD GERAL
   // =========================================================
   Future<void> _loadTudo() async {
-    // 1. tenta cache
+    // 1. tenta cache local primeiro
     await _loadPerguntasFromCache();
     await _loadRespostasFromCache();
 
-    // 2. tenta API
+    // 2. tenta API depois
     try {
       final idQuestionario = int.tryParse(widget.questionario.id ?? '') ?? 0;
       final listaApi =
@@ -140,7 +150,7 @@ class _QuestionarioPageState extends State<QuestionarioPage> {
         _loading = false;
       });
 
-      // garante que todas as perguntas tenham entrada em _respostas
+      // garante que todas as perguntas tenham um RespostaLocal
       for (final p in listaApi) {
         _respostas.putIfAbsent(
           p.id,
@@ -148,12 +158,14 @@ class _QuestionarioPageState extends State<QuestionarioPage> {
             perguntaId: p.id,
             valor: p.respostaSimples,
             valoresMultiplos: List<String>.from(p.respostaMultipla),
-            sincronizado: true, // veio do servidor, então sync
+            justificativa: p.justificativa,
+            midias: List<String>.from(p.midias),
+            sincronizado: true, // vindo da API, assumimos sincronizado
           ),
         );
       }
 
-      // salva estado atualizado em cache
+      // salva versão mais nova em cache
       await _savePerguntasToCache(listaApi);
       await _saveRespostasToCache();
     } catch (e) {
@@ -163,7 +175,7 @@ class _QuestionarioPageState extends State<QuestionarioPage> {
           _loading = false;
         });
       }
-      // se já tinha cache, segue offline
+      // se já tinha cache, ok, segue offline
     }
   }
 
@@ -174,7 +186,7 @@ class _QuestionarioPageState extends State<QuestionarioPage> {
   }
 
   // =========================================================
-  // Atualização de respostas (onChange do usuário)
+  // ATUALIZAÇÕES DE ESTADO DO FORM (onChange)
   // =========================================================
   void _atualizarRespostaSimples(int perguntaId, String? novoValor) {
     setState(() {
@@ -182,7 +194,7 @@ class _QuestionarioPageState extends State<QuestionarioPage> {
           RespostaLocal(perguntaId: perguntaId);
 
       atual.valor = novoValor;
-      atual.sincronizado = false; // ficou pendente de envio
+      atual.sincronizado = false;
       _respostas[perguntaId] = atual;
     });
     _saveRespostasToCache();
@@ -193,21 +205,96 @@ class _QuestionarioPageState extends State<QuestionarioPage> {
       final atual = _respostas[perguntaId] ??
           RespostaLocal(perguntaId: perguntaId);
 
-      final lista = atual.valoresMultiplos;
+      final lista = List<String>.from(atual.valoresMultiplos);
       if (lista.contains(valorOpcao)) {
         lista.remove(valorOpcao);
       } else {
         lista.add(valorOpcao);
       }
-
-      atual.sincronizado = false; // pendente
+      atual.valoresMultiplos = lista;
+      atual.sincronizado = false;
       _respostas[perguntaId] = atual;
     });
     _saveRespostasToCache();
   }
 
+  void _atualizarJustificativa(int perguntaId, String texto) {
+    setState(() {
+      final atual = _respostas[perguntaId] ??
+          RespostaLocal(perguntaId: perguntaId);
+
+      atual.justificativa = texto;
+      atual.sincronizado = false;
+      _respostas[perguntaId] = atual;
+    });
+    _saveRespostasToCache();
+  }
+
+  Future<void> _adicionarMidia(int perguntaId) async {
+    // abre câmera
+    final XFile? foto = await _picker.pickImage(
+      source: ImageSource.camera,
+      imageQuality: 75, // reduz tamanho, bom pra offline
+    );
+
+    if (foto == null) {
+      // usuário cancelou
+      return;
+    }
+
+    setState(() {
+      final atual = _respostas[perguntaId] ??
+          RespostaLocal(perguntaId: perguntaId);
+
+      final novasMidias = List<String>.from(atual.midias);
+      novasMidias.add(foto.path); // path local do arquivo .jpg no device
+
+      atual.midias = novasMidias;
+      atual.sincronizado = false;
+      _respostas[perguntaId] = atual;
+    });
+
+    _saveRespostasToCache();
+  }
+
+  Widget _buildMiniaturasMidia(int perguntaId) {
+    final r = _respostas[perguntaId];
+    final midias = r?.midias ?? [];
+
+    if (midias.isEmpty) {
+      return const Text(
+        'Nenhuma foto anexada ainda.',
+        style: TextStyle(fontSize: 12, fontStyle: FontStyle.italic),
+      );
+    }
+
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: midias.map((path) {
+        return ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: Container(
+            width: 64,
+            height: 64,
+            color: Colors.black12,
+            child: Image.file(
+              File(path),
+              fit: BoxFit.cover,
+              errorBuilder: (_, __, ___) {
+                return const Center(
+                  child: Icon(Icons.broken_image, size: 28),
+                );
+              },
+            ),
+          ),
+        );
+      }).toList(),
+    );
+  }
+
   // =========================================================
-  // Badge visual de sync
+  // BADGE DE SYNC
   // =========================================================
   Widget _buildSyncBadge(bool sincronizado) {
     return Row(
@@ -231,158 +318,211 @@ class _QuestionarioPageState extends State<QuestionarioPage> {
   }
 
   // =========================================================
-  // Widgets por tipo de pergunta
+  // WIDGETS POR TIPO DE PERGUNTA
   // =========================================================
   Widget _buildCampoPergunta(Pergunta p) {
     final rLocal = _respostas[p.id];
 
-    // para TextBox / RadioButton
-    final respostaSimplesAtual = rLocal?.valor ?? p.respostaSimples ?? '';
+    final respostaSimplesAtual =
+        rLocal?.valor ?? p.respostaSimples ?? '';
 
-    // para CheckBoxList
     final respostaMultiplaAtual =
         (rLocal?.valoresMultiplos.isNotEmpty == true)
             ? rLocal!.valoresMultiplos
             : p.respostaMultipla;
 
+    final justificativaAtual =
+        rLocal?.justificativa ?? p.justificativa ?? '';
+
     final bool sincronizado = rLocal?.sincronizado ?? true;
+
+    List<Widget> conteudoPrincipal;
 
     switch (p.tipo) {
       case 'TextBox': {
         final mask = p.mascara;
         final controllersValue = respostaSimplesAtual;
 
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // título da pergunta + badge
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Flexible(
-                  child: Text(
-                    p.enunciado,
-                    style: const TextStyle(fontWeight: FontWeight.bold),
-                  ),
+        conteudoPrincipal = [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Flexible(
+                child: Text(
+                  p.enunciado,
+                  style: const TextStyle(fontWeight: FontWeight.bold),
                 ),
-                _buildSyncBadge(sincronizado),
-              ],
-            ),
-            const SizedBox(height: 8),
-            TextField(
-              controller: TextEditingController(text: controllersValue)
-                ..selection = TextSelection.fromPosition(
-                  TextPosition(offset: controllersValue.length),
-                ),
-              decoration: InputDecoration(
-                hintText: mask,
               ),
-              keyboardType: pickKeyboardForMask(mask),
-              inputFormatters: buildFormattersForMask(mask),
-              onChanged: (val) {
-                _atualizarRespostaSimples(p.id, val);
-              },
+              _buildSyncBadge(sincronizado),
+            ],
+          ),
+          const SizedBox(height: 8),
+          TextField(
+            controller: TextEditingController(text: controllersValue)
+              ..selection = TextSelection.fromPosition(
+                TextPosition(offset: controllersValue.length),
+              ),
+            decoration: InputDecoration(
+              hintText: mask,
             ),
-          ],
-        );
+            keyboardType: pickKeyboardForMask(mask),
+            inputFormatters: buildFormattersForMask(mask),
+            onChanged: (val) {
+              _atualizarRespostaSimples(p.id, val);
+            },
+          ),
+        ];
+        break;
       }
 
-      case 'RadioButton':
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // título da pergunta + badge
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Flexible(
-                  child: Text(
-                    p.enunciado,
-                    style: const TextStyle(fontWeight: FontWeight.bold),
-                  ),
+      case 'RadioButton': {
+        conteudoPrincipal = [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Flexible(
+                child: Text(
+                  p.enunciado,
+                  style: const TextStyle(fontWeight: FontWeight.bold),
                 ),
-                _buildSyncBadge(sincronizado),
-              ],
-            ),
-            const SizedBox(height: 8),
-            // opções lado a lado
-            Wrap(
-              spacing: 16,
-              runSpacing: 8,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              children: p.opcoes.map((op) {
-                final selectedValue = (respostaSimplesAtual.isEmpty
-                    ? null
-                    : respostaSimplesAtual);
-
-                return Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Radio<String>(
-                      value: op.valor,
-                      groupValue: selectedValue,
-                      onChanged: (val) {
-                        _atualizarRespostaSimples(p.id, val);
-                      },
-                    ),
-                    Text(op.rotulo),
-                  ],
-                );
-              }).toList(),
-            ),
-          ],
-        );
-
-      case 'CheckBoxList':
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // título da pergunta + badge
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Flexible(
-                  child: Text(
-                    p.enunciado,
-                    style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
+              _buildSyncBadge(sincronizado),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 16,
+            runSpacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: p.opcoes.map((op) {
+              final selectedValue = (respostaSimplesAtual.isEmpty
+                  ? null
+                  : respostaSimplesAtual);
+              return Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Radio<String>(
+                    value: op.valor,
+                    groupValue: selectedValue,
+                    onChanged: (val) {
+                      _atualizarRespostaSimples(p.id, val);
+                    },
                   ),
-                ),
-                _buildSyncBadge(sincronizado),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Column(
-              children: p.opcoes.map((op) {
-                final marcado = respostaMultiplaAtual.contains(op.valor);
-                return CheckboxListTile(
-                  title: Text(op.rotulo),
-                  value: marcado,
-                  onChanged: (_) {
-                    _toggleRespostaMultipla(p.id, op.valor);
-                  },
-                );
-              }).toList(),
-            ),
-          ],
-        );
+                  Text(op.rotulo),
+                ],
+              );
+            }).toList(),
+          ),
+        ];
+        break;
+      }
 
-      default:
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              p.enunciado,
-              style: const TextStyle(fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 4),
-            Text('Tipo não suportado: ${p.tipo}'),
-          ],
-        );
+      case 'CheckBoxList': {
+        conteudoPrincipal = [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Flexible(
+                child: Text(
+                  p.enunciado,
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
+              ),
+              _buildSyncBadge(sincronizado),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Column(
+            children: p.opcoes.map((op) {
+              final marcado = respostaMultiplaAtual.contains(op.valor);
+              return CheckboxListTile(
+                title: Text(op.rotulo),
+                value: marcado,
+                onChanged: (_) {
+                  _toggleRespostaMultipla(p.id, op.valor);
+                },
+              );
+            }).toList(),
+          ),
+        ];
+        break;
+      }
+
+      default: {
+        conteudoPrincipal = [
+          Text(
+            p.enunciado,
+            style: const TextStyle(fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 4),
+          Text('Tipo não suportado: ${p.tipo}'),
+        ];
+      }
     }
+
+    // Campos adicionais condicionais (justificativa / mídia)
+    final extras = <Widget>[];
+
+    if (p.obrigaJustificativa == 1) {
+      extras.addAll([
+        const SizedBox(height: 12),
+        const Text(
+          'Justificativa',
+          style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+        ),
+        const SizedBox(height: 4),
+        TextField(
+          controller: TextEditingController(text: justificativaAtual)
+            ..selection = TextSelection.fromPosition(
+              TextPosition(offset: justificativaAtual.length),
+            ),
+          maxLines: 3,
+          decoration: const InputDecoration(
+            hintText: 'Descreva o problema...',
+            border: OutlineInputBorder(),
+          ),
+          onChanged: (val) {
+            _atualizarJustificativa(p.id, val);
+          },
+        ),
+      ]);
+    }
+
+    if (p.obrigaMidia == 1) {
+      extras.addAll([
+        const SizedBox(height: 12),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            const Text(
+              'Foto(s) obrigatória(s)',
+              style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+            ),
+            ElevatedButton.icon(
+              onPressed: () {
+                _adicionarMidia(p.id);
+              },
+              icon: const Icon(Icons.camera_alt),
+              label: const Text('Adicionar'),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        _buildMiniaturasMidia(p.id),
+      ]);
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        ...conteudoPrincipal,
+        ...extras,
+      ],
+    );
   }
 
   // =========================================================
-  // Agrupamento por bloco (para montar os ExpansionTile)
+  // AGRUPAMENTO POR BLOCO
   // =========================================================
   Map<String, List<Pergunta>> _groupPerguntasPorBloco(List<Pergunta> perguntas) {
     final Map<String, List<Pergunta>> grupos = {};
@@ -394,10 +534,9 @@ class _QuestionarioPageState extends State<QuestionarioPage> {
   }
 
   // =========================================================
-  // Envio (sincronização manual)
+  // SYNC ENVIO
   // =========================================================
 
-  // Monta o payload só com o que está offline (sincronizado == false)
   Map<String, dynamic> _buildPayloadNaoSincronizado() {
     final pendentes = _respostas.values
         .where((r) => r.sincronizado == false)
@@ -405,11 +544,18 @@ class _QuestionarioPageState extends State<QuestionarioPage> {
 
     return {
       'questionario_id': widget.questionario.id,
-      'respostas': pendentes.map((r) => r.toJson()).toList(),
+      'respostas': pendentes.map((r) {
+        return {
+          'pergunta_id': r.perguntaId,
+          'valor': r.valor,
+          'valores_multiplos': r.valoresMultiplos,
+          'justificativa': r.justificativa,
+          'midias': r.midias,
+        };
+      }).toList(),
     };
   }
 
-  // Após enviar com sucesso, marcar tudo como sincronizado = true
   Future<void> _marcarComoSincronizadoLocal() async {
     bool mudouAlgo = false;
     for (final r in _respostas.values) {
@@ -420,13 +566,14 @@ class _QuestionarioPageState extends State<QuestionarioPage> {
     }
     if (mudouAlgo) {
       await _saveRespostasToCache();
-      setState(() {}); // atualiza ícones visuais
+      setState(() {}); // atualiza badges
     }
   }
 
   Future<void> _enviarRespostasNaoSincronizadas() async {
-    final pendentes =
-        _respostas.values.where((r) => r.sincronizado == false).toList();
+    final pendentes = _respostas.values
+        .where((r) => r.sincronizado == false)
+        .toList();
 
     if (pendentes.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -444,10 +591,8 @@ class _QuestionarioPageState extends State<QuestionarioPage> {
     final payload = _buildPayloadNaoSincronizado();
 
     try {
-      // Chama a API que você implementou no ApiService
       await ApiService.enviarRespostas(payload);
 
-      // Se deu certo: marca localmente como sincronizado
       await _marcarComoSincronizadoLocal();
 
       ScaffoldMessenger.of(context).showSnackBar(
@@ -513,7 +658,6 @@ class _QuestionarioPageState extends State<QuestionarioPage> {
                     final nomeBloco = blocosOrdenados[blocoIndex];
                     final perguntasDoBloco = blocosMap[nomeBloco] ?? [];
 
-                    // bloco está sincronizado se TODAS as respostas dele estão sincronizadas
                     final bool blocoSincronizado = perguntasDoBloco.every((p) {
                       final rLocal = _respostas[p.id];
                       return rLocal?.sincronizado ?? true;

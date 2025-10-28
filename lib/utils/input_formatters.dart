@@ -1,6 +1,7 @@
 import 'package:flutter/services.dart';
+import 'package:flutter/material.dart';
 
-/// Força que o usuário só digite dígitos.
+/// Só dígitos.
 class DigitsOnlyFormatter extends TextInputFormatter {
   @override
   TextEditingValue formatEditUpdate(
@@ -10,18 +11,13 @@ class DigitsOnlyFormatter extends TextInputFormatter {
     final onlyDigits = newValue.text.replaceAll(RegExp(r'[^0-9]'), '');
     return newValue.copyWith(
       text: onlyDigits,
-      selection: updateCursor(onlyDigits),
+      selection: TextSelection.collapsed(offset: onlyDigits.length),
     );
-  }
-
-  TextSelection updateCursor(String text) {
-    return TextSelection.collapsed(offset: text.length);
   }
 }
 
-/// Máscara genérica tipo "hh:mm", "dd/mm/yyyy", "000.000.000-00", etc.
-/// Usa `maskChar` pra saber o que é caractere dinâmico.
-/// - default: `0` ou `9` ou `#` = dígito
+/// Máscara genérica tipo "000.000.000-00".
+/// Usa 0/9/# como placeholder de dígito, o resto é literal.
 class PatternMaskFormatter extends TextInputFormatter {
   final String pattern;
   final RegExp allowedCharMatcher;
@@ -36,7 +32,7 @@ class PatternMaskFormatter extends TextInputFormatter {
     TextEditingValue oldValue,
     TextEditingValue newValue,
   ) {
-    // remove tudo que não bate com allowedCharMatcher
+    // pega só os caracteres aceitos
     final raw = newValue.text.replaceAll(RegExp(r'[^0-9]'), '');
     final buffer = StringBuffer();
     int rawIndex = 0;
@@ -44,14 +40,12 @@ class PatternMaskFormatter extends TextInputFormatter {
     for (int i = 0; i < pattern.length && rawIndex < raw.length; i++) {
       final pChar = pattern[i];
 
-      // se o pattern pede dígito (0,9,#), preenche com o próximo número
       if (pChar == '0' || pChar == '9' || pChar == '#') {
         final nextDigit = raw[rawIndex];
         if (!allowedCharMatcher.hasMatch(nextDigit)) break;
         buffer.write(nextDigit);
         rawIndex++;
       } else {
-        // caractere fixo da máscara ("/", ":", "-", etc)
         buffer.write(pChar);
       }
     }
@@ -64,11 +58,10 @@ class PatternMaskFormatter extends TextInputFormatter {
   }
 }
 
-/// Máscara especial para hora "hh:mm"
+/// hh:mm
 class HoraFormatter extends TextInputFormatter {
   @override
   TextEditingValue formatEditUpdate(oldValue, newValue) {
-    // pega só dígitos
     String digits = newValue.text.replaceAll(RegExp(r'[^0-9]'), '');
     if (digits.length > 4) digits = digits.substring(0, 4);
 
@@ -87,7 +80,7 @@ class HoraFormatter extends TextInputFormatter {
   }
 }
 
-/// Máscara especial para data "dd/mm/yyyy"
+/// dd/mm/yyyy
 class DataFormatter extends TextInputFormatter {
   @override
   TextEditingValue formatEditUpdate(oldValue, newValue) {
@@ -109,23 +102,18 @@ class DataFormatter extends TextInputFormatter {
   }
 }
 
-/// Máscara especial de placa "***-****"
-/// A regra que você mandou sugere:
-/// - 3 letras (qualquer coisa?), hífen, 4 números.
-/// Vou assumir:
-///   primeiras 3 posições = letras maiúsculas [A-Z]
-///   últimas 4 = dígitos [0-9]
+/// ***-**** (3 letras + hífen + 4 dígitos)
 class PlacaFormatter extends TextInputFormatter {
   @override
   TextEditingValue formatEditUpdate(oldValue, newValue) {
-    // separa letras e dígitos conforme posição
-    final raw = newValue.text.toUpperCase().replaceAll(RegExp(r'[^A-Z0-9]'), '');
+    final raw = newValue.text
+        .toUpperCase()
+        .replaceAll(RegExp(r'[^A-Z0-9]'), '');
 
     String letras = '';
     String numeros = '';
 
     int i = 0;
-    // pega até 3 letras
     while (i < raw.length && letras.length < 3) {
       final ch = raw[i];
       if (RegExp(r'[A-Z]').hasMatch(ch)) {
@@ -133,7 +121,6 @@ class PlacaFormatter extends TextInputFormatter {
       }
       i++;
     }
-    // pega até 4 dígitos depois
     while (i < raw.length && numeros.length < 4) {
       final ch = raw[i];
       if (RegExp(r'[0-9]').hasMatch(ch)) {
@@ -155,57 +142,43 @@ class PlacaFormatter extends TextInputFormatter {
   }
 }
 
-/// Retorna o(s) formatter(s) corretos baseado na máscara declarada.
+/// decide formatters pra máscara
 List<TextInputFormatter> buildFormattersForMask(String? mascara) {
-  if (mascara == null) {
-    return const [];
-  }
+  if (mascara == null) return const [];
 
   final m = mascara.toLowerCase();
 
   if (m == 'hh:mm') {
     return [HoraFormatter()];
   }
-
   if (m == 'dd/mm/yyyy') {
     return [DataFormatter()];
   }
-
   if (m == '***-****') {
     return [PlacaFormatter()];
   }
-
-  // "0" = só dígitos (ex: KM VEÍCULO)
   if (m == '0') {
     return [DigitsOnlyFormatter()];
   }
-
-  // "a" = qualquer coisa livre, então sem formatter especial
   if (m == 'a') {
+    // texto livre, sem restrição
     return const [];
   }
 
-  // fallback genérico:
-  // Se você quiser no futuro suportar outras máscaras tipo "000.000.000-00" (CPF),
-  // você pode mapear pra PatternMaskFormatter('000.000.000-00')
-  // Aqui vamos tentar detectar automaticamente se a máscara é feita só de
-  // dígitos fixos e separadores.
   final hasZeroMaskChars = RegExp(r'[0#9]').hasMatch(mascara);
   final hasOnlyAllowedSymbols =
       RegExp(r'^[0-9#\-:./ ]+$').hasMatch(mascara.replaceAll('0', '0'));
+
   if (hasZeroMaskChars || hasOnlyAllowedSymbols) {
-    // Exemplo: "000.000.000-00"
     return [
-      PatternMaskFormatter(
-        pattern: mascara,
-      ),
+      PatternMaskFormatter(pattern: mascara),
     ];
   }
 
   return const [];
 }
 
-/// Também escolhemos o teclado ideal pro campo.
+/// decide teclado pro campo
 TextInputType pickKeyboardForMask(String? mascara) {
   if (mascara == null) {
     return TextInputType.text;
@@ -215,9 +188,8 @@ TextInputType pickKeyboardForMask(String? mascara) {
 
   if (m == 'hh:mm') return TextInputType.number;
   if (m == 'dd/mm/yyyy') return TextInputType.number;
-  if (m == '***-****') return TextInputType.text; // placa tem letra e número
+  if (m == '***-****') return TextInputType.text;
   if (m == '0') return TextInputType.number;
 
-  // fallback (texto livre)
   return TextInputType.text;
 }

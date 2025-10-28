@@ -140,7 +140,7 @@ class ApiService {
     }
 
     // ajuste essa rota para o endpoint real do Laravel
-    final uri = Uri.parse('$apiBase/sincronizar_respostas');
+    final uri = Uri.parse('$apiBase/questionario/sincronizar_respostas');
 
     final res = await http.post(
       uri,
@@ -162,4 +162,7 @@ class ApiService {
       throw Exception('Falha ao enviar respostas (${res.statusCode})');
     }
   }
+
+
+  
 }
